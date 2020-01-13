@@ -7,6 +7,9 @@ This library implements the end-to-end facial synthesis model described in this 
 ## Prerequisites
 The models provided are checked out using git LFS. You can install git LFS by following these [instructions](https://help.github.com/en/articles/installing-git-large-file-storage).
 
+## Downloading the models
+The models were hosted on git LFS. However the demand was so high that I reached the quota for free gitLFS storage. I have moved the models to GoogleDrive. Models can be found [here](https://drive.google.com/open?id=1pJdsnknLmMLvA8RQIAV3AQH8vU0FeK16).
+
 ## Installing
 
 To install the library do:
@@ -24,7 +27,7 @@ The model has been trained on the GRID, TCD-TIMIT, CREMA-D and LRW datasets. The
 
 ```
 import sda
-va = sda.VideoAnimator(gpu=0, model_path="crema")# Instantiate the aminator
+va = sda.VideoAnimator(gpu=0, model_path="crema")# Instantiate the animator
 ```
 
 The models that are currently uploaded are:
@@ -37,7 +40,7 @@ The models that are currently uploaded are:
 ### Example with Image and Audio Paths
 ```
 import sda
-va = sda.VideoAnimator(gpu=0)# Instantiate the aminator
+va = sda.VideoAnimator(gpu=0)# Instantiate the animator
 vid, aud = va("example/image.bmp", "example/audio.wav")
 ```
 
@@ -47,7 +50,7 @@ import sda
 import scipy.io.wavfile as wav
 from PIL import Image
 
-va = sda.VideoAnimator(gpu=0)# Instantiate the aminator
+va = sda.VideoAnimator(gpu=0)# Instantiate the animator
 fs, audio_clip = wav.read("example/audio.wav")
 still_frame = Image.open("example/image.bmp")
 vid, aud = va(frame, audio_clip, fs=fs)

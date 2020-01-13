@@ -12,6 +12,9 @@ setup(name='sda',
           'scikit-video',
           'scikit-image',
           'ffmpeg-python',
-          'face-alignment'
-      ],
+          'torch',
+          'face-alignment',
+          'torchvision',
+          'pydub',
+          ],
       zip_safe=False)
