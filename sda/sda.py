@@ -1,6 +1,5 @@
 from torchvision import transforms
 import torch
-import torchaudio
 from .encoder_image import Encoder
 from .img_generator import Generator
 from .rnn_audio import RNN
@@ -17,6 +16,8 @@ import skvideo.io as sio
 import scipy.io.wavfile as wav
 import ffmpeg
 import face_alignment
+from pydub import AudioSegment
+from pydub.utils import mediainfo
 
 
 @contextlib.contextmanager
@@ -43,12 +44,11 @@ def tempdir():
 
 def get_audio_feature_extractor(model_path="grid", gpu=-1):
     if model_path == "grid":
-        model_path = os.path.split(__file__)[0] + "/data/grid.dat"
+        model_path = os.path.join(os.path.split(__file__)[0], "data", "grid.dat")
     elif model_path == "timit":
-        model_path = os.path.split(__file__)[0] + "/data/timit.dat"
+        model_path = os.path.join(os.path.split(__file__)[0], "data", "timit.dat")
     elif model_path == "crema":
-        model_path = os.path.split(__file__)[0] + "/data/crema.dat"
-	
+        model_path = os.path.join(os.path.split(__file__)[0], "data", "crema.dat")
 
     if gpu < 0:
         device = torch.device("cpu")
@@ -94,20 +94,20 @@ class VideoAnimator():
     def __init__(self, model_path="grid", gpu=-1):
 
         if model_path == "grid":
-            model_path = os.path.split(__file__)[0] + "/data/grid.dat"
+            model_path = os.path.join(os.path.split(__file__)[0], "data", "grid.dat")
         elif model_path == "timit":
-            model_path = os.path.split(__file__)[0] + "/data/timit.dat"
+            model_path = os.path.join(os.path.split(__file__)[0], "data", "timit.dat")
         elif model_path == "crema":
-            model_path = os.path.split(__file__)[0] + "/data/crema.dat"
+            model_path = os.path.join(os.path.split(__file__)[0], "data", "crema.dat")
 
         if gpu < 0:
             self.device = torch.device("cpu")
             model_dict = torch.load(model_path, map_location=lambda storage, loc: storage)
-            self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, device="cpu", flip_input=False)
+            self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device="cpu", flip_input=False)
         else:
             self.device = torch.device("cuda:" + str(gpu))
             model_dict = torch.load(model_path, map_location=lambda storage, loc: storage.cuda(gpu))
-            self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, device="cuda:" + str(gpu),
+            self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device="cuda:" + str(gpu),
                                                    flip_input=False)
 
         self.stablePntsIDs = [33, 36, 39, 42, 45]
@@ -122,14 +122,13 @@ class VideoAnimator():
         self.aud_enc_dim = model_dict['aud_enc_dim']
         self.aux_latent = model_dict['aux_latent']
         self.sequential_noise = model_dict['sequential_noise']
+        self.conversion_dict = {'s16': np.int16, 's32': np.int32}
 
         self.img_transform = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Resize((self.img_size[0], self.img_size[1])),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
-        self.audio_transform = torchaudio.transforms.Scale()
 
         self.encoder = RNN(self.audio_feat_len, self.aud_enc_dim, self.rnn_gen_dim,
                            self.audio_rate, init_kernel=0.005, init_stride=0.001)
@@ -155,26 +154,37 @@ class VideoAnimator():
         self.encoder_id.eval()
         self.generator.eval()
 
-    def save_video(self, video, audio, path, experimental_ffmpeg=False):
+    def save_video(self, video, audio, path, overwrite=True, experimental_ffmpeg=False, scale=None):
+        if not os.path.isabs(path):
+            path = os.path.join(os.getcwd(), path)
+
         with tempdir() as dirpath:
             # Save the video file
-            writer = sio.FFmpegWriter(dirpath + "/tmp.avi",
+            writer = sio.FFmpegWriter(os.path.join(dirpath, "tmp.avi"),
                                       inputdict={'-r': str(self.video_rate) + "/1", },
                                       outputdict={'-r': str(self.video_rate) + "/1", }
                                       )
             for i in range(video.shape[0]):
-                writer.writeFrame(np.rollaxis(video[i, :, :, :], 0, 3))
+                frame = np.rollaxis(video[i, :, :, :], 0, 3)
+
+                if scale is not None:
+                    frame = tf.rescale(frame, scale, anti_aliasing=True, multichannel=True, mode='reflect')
+
+                writer.writeFrame(frame)
             writer.close()
 
             # Save the audio file
-            wav.write(dirpath + "/tmp.wav", self.audio_rate, audio)
+            wav.write(os.path.join(dirpath, "tmp.wav"), self.audio_rate, audio)
 
-            in1 = ffmpeg.input(dirpath + "/tmp.avi")
-            in2 = ffmpeg.input(dirpath + "/tmp.wav")
+            in1 = ffmpeg.input(os.path.join(dirpath, "tmp.avi"))
+            in2 = ffmpeg.input(os.path.join(dirpath, "tmp.wav"))
             if experimental_ffmpeg:
                 out = ffmpeg.output(in1['v'], in2['a'], path, strict='-2', loglevel="panic")
             else:
                 out = ffmpeg.output(in1['v'], in2['a'], path, loglevel="panic")
+
+            if overwrite:
+                out = out.overwrite_output()
             out.run()
 
     def preprocess_img(self, img):
@@ -184,7 +194,6 @@ class VideoAnimator():
         warped = tf.warp(img, inverse_map=tform.inverse, output_shape=self.img_size)  # wrap the frame image
         warped = warped * 255  # note output from wrap is double image (value range [0,1])
         warped = warped.astype('uint8')
-        import scipy.misc
 
         return warped
 
@@ -210,7 +219,9 @@ class VideoAnimator():
 
     def __call__(self, img, audio, fs=None, aligned=False):
         if isinstance(img, str):  # if we have a path then grab the image
-            frame = np.array(Image.open(img))
+            frm = Image.open(img)
+            frm.thumbnail((400, 400))
+            frame = np.array(frm)
         else:
             frame = img
 
@@ -218,32 +229,37 @@ class VideoAnimator():
             frame = self.preprocess_img(frame)
 
         if isinstance(audio, str):  # if we have a path then grab the audio clip
-            audio, fs = torchaudio.load(audio, channels_first=False)
-            if audio.size(1) != 1:
-                audio = audio[:, 0].view(-1, 1)
+            info = mediainfo(audio)
+            fs = int(info['sample_rate'])
+            audio = np.array(AudioSegment.from_file(audio, info['format_name']).set_channels(1).get_array_of_samples())
 
-            if fs != self.audio_rate:
-                seq_length = audio.shape[0]
-                speech = torch.from_numpy(signal.resample(audio.cpu().detach().numpy(), int(seq_length * self.audio_rate / fs))).float()
-                speech = speech.view(-1, 1)
+            if info['sample_fmt'] in self.conversion_dict:
+                audio = audio.astype(self.conversion_dict[info['sample_fmt']])
             else:
-                speech = audio.view(-1,1)
+                if max(audio) > np.iinfo(np.int16).max:
+                    audio = audio.astype(np.int32)
+                else:
+                    audio = audio.astype(np.int16)
+
+        if fs is None:
+            raise AttributeError("Audio provided without specifying the rate. Specify rate or use audio file!")
+
+        if audio.ndim > 1 and audio.shape[1] > 1:
+            audio = audio[:, 0]
+
+        max_value = np.iinfo(audio.dtype).max
+        if fs != self.audio_rate:
+            seq_length = audio.shape[0]
+            speech = torch.from_numpy(
+                signal.resample(audio, int(seq_length * self.audio_rate / float(fs))) / float(max_value)).float()
+            speech = speech.view(-1, 1)
         else:
-            if fs is None:
-                raise AttributeError("Audio provided without specifying the rate. Specify rate or use audio file!")
-            max_value = np.iinfo(audio.dtype).max 
-            if fs != self.audio_rate:
-                seq_length = audio.shape[0]
-                speech = torch.from_numpy(
-                    2 * signal.resample(audio, int(seq_length * self.audio_rate / fs)) / max_value).float()
-                speech = speech.view(-1, 1)
-            else:
-                audio = torch.from_numpy(2 * audio / max_value).float()
-                speech = audio.view(-1, 1)
+            audio = torch.from_numpy(audio / float(max_value)).float()
+            speech = audio.view(-1, 1)
 
         frame = self.img_transform(frame).to(self.device)
 
-        cutting_stride = int(self.audio_rate / self.video_rate)
+        cutting_stride = int(self.audio_rate / float(self.video_rate))
         audio_seq_padding = self.audio_feat_samples - cutting_stride
 
         # Create new sequences of the audio windows
